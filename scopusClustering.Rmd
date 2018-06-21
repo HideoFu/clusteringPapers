@@ -1,0 +1,260 @@
+---
+title: "文書クラスタリング"
+output:
+  html_document:
+    toc: yes
+---
+
+Last updated: 2018-06-21
+
+```{r setup, echo = F, message = F}
+library(knitr)
+opts_chunk$set(message =F, echo = F, warning = F)
+# opts_chunk$set(cache = T)  # 検証用
+library(tm)
+```
+
+```{r var}
+# ユーザーが入力すべきパラメータ
+filename <- "scopus.csv"  # 読み込むファイル名
+output <- "clustered.csv"  # 文書クラスタ番号を付与した出力ファイル名
+
+# 文書クラスタリング関連
+n_cl <- 5  # クラスタ数
+n_term <- 10  #  summary に表示するターム数
+
+# 個別クラスタ関連
+cl_no <- 1  # 対象とするクラスタ
+n_wc <- 50  # word cloud に表示するターム数
+
+
+# ワードクラスタリング関連
+n_gram <- 1  # 連続する何語までを「ワード」とするか
+n_words <- 80  # 樹形図に表示する最大ワード数
+
+# 個別文書クラスタ解析
+## 全文書を対象とする場合、assoc_cl_no を 0 にする
+assoc_cl_no <- 1 # 対象とする文書クラスタ番号
+
+## 共起ワード
+kw <- stemDocument("macrophage")  # 注目キーワード
+```
+```{r stopWords}
+# 以下の語は除いて処理される
+
+sw <- c(stopwords("en"), 
+        # 書誌事項関連
+        "doi", "2016", "2017", "2018", "elsevier", "wiley", "wolters", "kluwer",
+        # 期間関連
+        "day", "month", "year", "period",
+        # 時間変化
+        "still",
+        # 概念
+        "possible",
+        # 固有名詞
+        "john", "son",
+        "group", "tissue", "technique", "surgery", "surgical", "higher", "compared", "increased", "treatment", "rate", "one", "outcomes", "clinical","time", "outcomes","followup","age", "use","associated","may","inc","can","patient","two","present","performed","significant","observed","aim","evaluate","purpose","healing","study","conclusion","methods","results","showed","using","also","evaluated","however","background","conclusions","analysis","used","found","included","total","authors","underwent","cases","outcome","weeks","control","groups","mean","patients", "rats","formation","defects","defect","regeneration","range","case","therapy","factors","potential","new","lower","evidence","level","following","site","process","first","difference","treated","method","research","society","demonstrated","increase","including","although","respectively","copyright","reserved","rights","revealed","well","high","studies","without","achieved","system","due","assessed","tomography","analyzed","objective","followed","three","investigated","bone","material","association","american","surgeons","data","differences","different","significantly","effective","improved","effect","model","early","type","reduction","functional","good", "005","scores","imaging","area","male","procedure","report","primary","common","function","local","numer","standard","reported","ltd","according","determine","better","improve","within","evaluation","based","findings","development","role","reduced","health","activity","decreased","levels","among","published","greater","application","radiographic","approach","average","management","volume","effects","divided","animals","four","developed","long","scale","statistically","important","received","therapeutic","therefore","investigate","provide","considered","introduction","number","parameters","female","various","compare","suggest","result","less","either","initial","vitro","vivo","enhanced","loss","assess","postoperative","postoperatively","retrospective","surface","large","complete","prospective","confirmed","review","via","efficacy","poor","computed","thus","whether","required","option","furthermore","promote","design","several","open", "combination","combined",  "lesion","remove","affect","involve","describe","success","operation","cause","need","change","relate","addition","occurance","size","point","indicate","test","limit","appear","remain","identifi","previous","analyse","similar","examine","detect","position","condition","induce","disease","challenge","form","measure","medical","specif","influence","response","obtain","lead","strategi","major","prevent","final","allow","consist","miner","random","critic")
+```
+
+
+
+```{r loadPackages}
+library(readr)
+library(dplyr)
+library(Hmisc)
+library(SnowballC)
+library(RWeka)
+library(wordcloud)
+library(stringr)
+```
+
+```{r readData}
+data <- read_csv(filename)
+data <- mutate(data, doc_id = seq(1,nrow(data)))
+
+abst <- data_frame(doc_id = data$doc_id, text = data$抄録)
+abst <- abst[abst$text != "[抄録情報がありません]",]
+
+df_source <- DataframeSource(abst)
+corp <- VCorpus(df_source)
+```
+
+```{r cleanCorp}
+sw <- unique(stemDocument(sw))
+
+stemming <- function(text){
+  char_vec <- unlist(strsplit(text, split = " "))
+  stem_doc <- stemDocument(char_vec)
+  new_text <- paste(stem_doc, collapse = " ")
+  return(new_text)
+}
+
+
+clean_corp <- tm_map(corp, content_transformer(tolower)) %>%
+  tm_map(removePunctuation, preserve_intra_word_dashes = T) %>%
+  tm_map(stripWhitespace) %>%
+  tm_map(content_transformer(stemming)) %>%
+  tm_map(removeWords, sw)
+```
+
+
+
+# Document Clustering
+
+- 全文書につき、クラスタリングを行った。
+- Document Term Matrix (DTM) 化した後、文書間のユークリッド距離を求め、Ward 法で階層的クラスタリングを行った。
+
+```{r dtm}
+dtm <- DocumentTermMatrix(clean_corp)
+```
+
+```{r clustering}
+dtm_mat <- as.matrix(dtm)
+
+dist_dtm <- dist(dtm_mat, method = "euclidean")
+
+groups <- hclust(dist_dtm, method = "ward.D")
+plot(groups, main = "文書間クラスタリング")
+```
+
+
+全文書を`r n_cl` クラスタに分割し、全文書に対し各クラスタで頻出している単語上位 `r n_term` 語をクラスタサイズとともに以下に示す。
+
+```{r summary}
+cluster <- cutree(groups, n_cl)
+
+p_words <- colSums(dtm_mat)/sum(dtm_mat)
+
+# calulate word possibility deviations of each cluster over whole documents
+cl_words <- lapply(unique(cluster), function(x){
+  # filter rows
+  rows <- as.matrix(dtm_mat[cluster == x, ])
+  # select cols
+  rows <- as.matrix(rows[, colSums(rows) >0])
+  # deviation
+  colSums(rows) / sum(rows) - p_words[colnames(rows)]
+})
+
+cl_summary <- data.frame(cluster = unique(cluster),
+                         size = as.numeric(table(cluster)),
+                         top_words = sapply(cl_words, function(d){
+                           paste(
+                             names(d)[order(d, decreasing = TRUE)][1:n_term],
+                             collapse = ", "
+                           )
+                         }),
+                         stringsAsFactors = F)
+
+kable(cl_summary)
+```
+
+```{r saveCluster}
+cl_df <- data_frame(doc_id = as.integer(names(cluster)), cluster = cluster)
+
+new_data <- data %>%
+  left_join(cl_df, by = "doc_id")
+
+write.csv(new_data, output, row.names = F)
+```
+クラスタ `r cl_no` 中の頻出語 `r n_wc` のワードクラウドを示す。文字が大きいほど頻出していることを表す。
+
+
+```{r wordCloud}
+layout(matrix(c(1,2), nrow = 2), heights = c(1,4))
+par(mar=rep(0,4))
+plot.new()
+text(x=0.5, y=0.5, cex = 2, paste("クラスタ", cl_no))
+
+wordcloud(words = names(cl_words[[cl_no]]),
+          freq = cl_words[[cl_no]],
+          max.words = n_wc,
+          random.order = F,
+          colors = c("red", "yellow", "blue")
+          )
+```
+
+# Word Clustering
+
+全文書中の高頻度語に対し、クラスタリングを行った。
+
+```{r TDM, fig.height = 10, fig.width= 12}
+# n-gram 化関数
+tokenizer <- function(x){
+  NGramTokenizer(x, Weka_control(min = 1, max = n_gram))
+}
+
+# TDM 作成
+tdm <- TermDocumentMatrix(clean_corp, control = list(weighting = weightTfIdf, tokenize = tokenizer))
+
+# 低頻度ワードの除去
+s_tdm <- tdm
+sparse = 1
+while(s_tdm$nrow > n_words){
+  sparse = sparse - 0.005
+  s_tdm <- removeSparseTerms(tdm, sparse = sparse)
+}
+
+
+dist_mat <- dist(as.matrix(s_tdm))
+hc <- hclust(dist_mat)
+
+plot(hc, labels = row.names(dist_mat))
+```
+
+文書クラスタ `r assoc_cl_no` 内の高頻度語に対し、クラスタリングを行った。
+```{r subTDM}
+if (assoc_cl_no == 0){
+  sub_tdm <- tdm
+} else {
+  sub_tdm <- as.TermDocumentMatrix(as.matrix(tdm)[,which(cluster == assoc_cl_no)], weighting = weightTfIdf)
+}
+```
+
+```{r subClustering, fig.height = 10, fig.width = 12}
+if (assoc_cl_no == 0){
+} else{
+  s_sub_tdm<- sub_tdm
+  sparse = 1
+  while(s_sub_tdm$nrow > n_words){
+    sparse = sparse - 0.005
+    s_sub_tdm <- removeSparseTerms(sub_tdm, sparse = sparse)
+  }
+  
+  
+  sub_dist_mat <- dist(as.matrix(s_sub_tdm))
+  sub_hc <- hclust(sub_dist_mat)
+  
+  plot(sub_hc, labels = row.names(sub_dist_mat), main = paste("クラスタ", assoc_cl_no))
+}
+```
+
+
+文書クラスタ `r assoc_cl_no` 内における `r kw` との共起ワードを抽出した
+
+```{r Assocs}
+asoc <- findAssocs(sub_tdm, kw, 0.2)
+
+df <- as.data.frame(unlist(asoc))
+
+colnames(df) <- "corr"
+rownames(df) <- str_remove(rownames(df), paste0(kw, "."))
+
+df$names <- rownames(df)
+df$id <- as.factor(seq(1:dim(df)[1]))
+
+if(assoc_cl_no == 0){
+  title <- paste(kw, "の共起ワード")
+} else {
+  title <- paste("クラスタ", assoc_cl_no, "における", kw, "の共起ワード")
+}
+
+p <- ggplot(df[1:10,], aes(x=id, y=corr)) + 
+  geom_bar(stat="identity") + 
+  scale_x_discrete(breaks=df$id,labels=df$names) +
+  theme(plot.margin = unit(c(1,1,2,1), "cm")) +
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1, size=rel(1.2)),
+        axis.title.x = element_blank()) +
+  ggtitle(title)
+
+print(p)
+```
